@@ -1,44 +1,71 @@
-# Organic launch draft: adjustable speed jump rope
+# Plan orgánico: Adjustable Speed Jump Rope
 
-## Product choice
+Producto en la tienda: https://da6gne-6x.myshopify.com/products/adjustable-speed-jump-rope
+USD 19.99 + USD 4.99 de envío internacional. Proveedor: CJ Dropshipping, SKU `CJWJWJYZ00491-{Blue,Green,Orange,Silver}`.
+Costo: USD 3.51 (plateado USD 3.62) + envío CJ, que a EE. UU. va de USD 6.32 a 6.61 según el método. Margen aproximado por venta a EE. UU.: USD 13.
 
-Test the adjustable speed jump rope (`CJ-FIT-9099`) from the local supplier catalog. It is easy to demonstrate in short video, has no apparel sizing, and the catalog lists an adjustable cable. The listed supplier cost is USD 4.25 before shipping, taxes, payment fees, and returns; it is not a verified landed cost.
+Público: personas de habla inglesa que entrenan en casa, boxeo o CrossFit. Redes: TikTok, Instagram Reels, YouTube Shorts.
 
-Do not publish or accept orders for it until the supplier confirms the product, current stock, exact SKU/variant identifier, included accessories, shipping destinations, delivery estimates, and landed cost. The image URLs in the catalog currently return “Not Found,” so replace them with verified product photos or footage.
+## Antes de empezar
 
-## English product copy draft
+1. **Pedí una muestra en CJ** para grabar el producto real: un color, el que más te guste para cámara (naranja o verde se ven mejor).
+   Costo aproximado a Argentina: USD 3.51 + USD 9.09 (CJPacket Eub, 12-50 días).
+2. Mientras llega, grabá la **etapa 1** con cualquier cuerda que tengas. Esos videos enseñan a saltar; no muestran ni nombran el producto.
+3. Creá las cuentas con el mismo nombre en las tres redes (por ejemplo `@arandu.shop`) y poné el link de la tienda en la bio.
 
-**Title:** Adjustable Speed Jump Rope for Boxing and Training
+## Reglas para no meterte en problemas
 
-**Opening:** Keep your warm-up simple. This adjustable jump rope is made for boxing, conditioning, and everyday training sessions.
+- No digas "envío gratis", "garantía de por vida" ni cuántas calorías quema.
+- No muestres la bolsa ni el cable de repuesto: CJ no confirma que vengan.
+- No prometas resultados de salud ni de peso. Hablá de técnica, de ritmo y de lo práctico.
+- No uses fotos o videos de otras marcas.
 
-**Details to confirm with the supplier before publishing:** adjustable cable up to 3 m; dual-bearing handles; coated steel cable; spare cable and travel pouch included.
+## Etapa 1: entrenamiento (días 1-7, con cualquier cuerda)
 
-**Call to action:** Add it to your training kit.
+Formato: vertical 9:16, 15-30 segundos, texto grande en pantalla en los primeros 2 segundos, subtítulos siempre.
 
-Do not add a crossed-out “compare at” price, delivery promise, stock warning, review count, injury-prevention claim, or performance guarantee without evidence.
+| Día | Gancho en pantalla (primeros 2 s) | Qué grabás | Texto final en pantalla |
+|---|---|---|---|
+| 1 | "Can't do 30 seconds of jump rope? Try this." | 3 rondas de 20 s saltando / 20 s descanso, cámara fija de cuerpo entero | "Save this for your next workout" |
+| 2 | "The #1 jump rope mistake" | Primero saltando con los brazos abiertos (mal), después con los codos pegados y giro de muñeca (bien) | "Wrists, not arms." |
+| 3 | "How long should your jump rope be?" | Pisar el centro del cable, subir los mangos a las axilas, mostrar el largo correcto | "Armpit height = right length" |
+| 4 | "5-minute boxer warm-up" | Básico, paso de boxeo, alternado, rodillas altas: 1 minuto cada uno, cortado a 25 s | "Try it tomorrow morning" |
+| 5 | "Double-unders: the 3 steps" | Saltos altos sin cuerda → 1 doble + 3 simples → dobles seguidos | "Day 1 vs Day 30. Follow for part 2" |
+| 6 | "No gym? 10 minutes is enough." | Circuito: 40 s cuerda + 20 s sentadillas, 5 rondas, timelapse | "Comment 'PLAN' for the full routine" |
+| 7 | "Rate my jump rope form 1-10" | 15 s de tu mejor secuencia | Respondé cada comentario con un video corto |
 
-## Seven-day organic content test
+**Leyenda para todos (adaptala a cada video):**
+> Simple jump rope work you can do anywhere. Save it for your next session 🔁
+> #jumprope #skipping #boxingtraining #homeworkout #cardio #crossfit
 
-Post one original vertical video per day on Instagram Reels, TikTok, and YouTube Shorts. Use the same English-speaking audience and link to the product page only after checkout, shipping, and fulfillment work.
+## Etapa 2: producto (cuando llegue la muestra)
 
-1. **Hook:** “A warm-up you can do almost anywhere.” Show the rope and a short, clean skipping sequence.
-2. **Setup:** “Set your rope length with me.” Demonstrate adjustment only after confirming the rope’s adjustment mechanism.
-3. **Close-up:** Show the handles and cable in slow motion. Describe only features verified on the sample.
-4. **Beginner drill:** Show a short single-skip practice sequence, with a visible rest between rounds.
-5. **Gym bag check:** Show what is included in the package; do not show accessories until the supplier confirms them.
-6. **Form tip:** Demonstrate relaxed shoulders and small wrist turns. Keep it general and avoid injury or medical claims.
-7. **Community prompt:** “What is your go-to conditioning finisher?” Invite comments and answer them with useful follow-up clips.
+| Video | Gancho | Qué mostrás |
+|---|---|---|
+| A | "Why speed ropes spin faster" | Primer plano en cámara lenta de los extremos giratorios y el cable fino, al lado de una cuerda común |
+| B | "Unboxing my new speed rope" | Lo que realmente viene en el paquete, sin agregar nada |
+| C | "Cutting my rope to the right length" | Ajustar el largo del cable de verdad, paso a paso |
+| D | "Which color are you?" | Los colores que tengas (o fotos oficiales de los 4) |
+| E | Repetí los 2 videos de la etapa 1 que más visitas al perfil trajeron, ahora con esta cuerda |
 
-**Caption template:** “Working on my conditioning with a simple jump-rope session. What are you training today? See the adjustable rope at Arandu Shop.” Replace the product link with the live product URL after launch readiness is confirmed.
+**Leyenda de producto:**
+> Light speed rope with aluminum handles and a 3 m adjustable steel cable. 4 colors. Ships worldwide with tracking — link in bio.
+> #jumprope #speedrope #boxing #crossfit #homegym
 
-## Measure the test
+## Cómo responder comentarios
 
-Track video views, average watch time, profile visits, product-page visits, add-to-carts, and completed orders. After seven posts, repeat the two videos that earned the most qualified product-page visits. Views alone do not demonstrate purchase intent.
+- "Where's the rope from?" → "It's ours! Link in bio 🔗 Ships worldwide with tracking."
+- "How long does shipping take?" → "Most orders arrive in 7–15 business days after shipping, with tracking."
+- "Is it good for beginners?" → "Yes. Leave the cable a bit longer at first, then trim it as you get faster."
 
-## Launch blockers
+## Qué medir cada semana
 
-- The current live product is gymnastics grips, not this rope. Its Shopify record has no product images, no SKU, no inventory tracking, and an unsupported crossed-out price.
-- The repository has no supplier API key. Live fulfillment currently cannot be trusted until the correct CJ integration and item mapping are configured.
-- The store’s payment provider and international shipping coverage need confirmation in Shopify Admin.
-- Supplier catalog image URLs for the proposed rope return “Not Found.”
+En Shopify (Analytics) y en cada red: vistas, visitas al perfil, clics al link, visitas al producto, agregados al carrito, compras.
+Las vistas solas no venden: lo que importa es **visitas al perfil → clics al link → carrito**.
+Después de 7 videos, repetí el formato que más clics al link generó y dejá de hacer el que menos.
+
+## Cuando entre un pedido
+
+1. Revisá que el pedido aparezca en CJ (**Orders → Store Orders**). Si el producto no está vinculado, en CJ entrá a **Products → Connection** y conectá la cuerda de Shopify con el producto de CJ, color por color.
+2. Pagalo en CJ (producto + envío) con la billetera de CJ o con tarjeta.
+3. CJ despacha y sube el tracking a Shopify solo; Shopify le manda el mail al cliente.
