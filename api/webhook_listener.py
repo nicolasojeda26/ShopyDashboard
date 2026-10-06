@@ -10,6 +10,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import sys
 import time
 import uuid
@@ -52,6 +53,27 @@ app = FastAPI(
     version="2.0.0",
     description="Real-time multi-agent dropshipping pipeline dashboard and automated fulfillment service.",
 )
+
+
+@app.middleware("http")
+async def protect_dashboard_api(request: Request, call_next):
+    """Require a private bearer token for dashboard and administrative APIs."""
+    if request.url.path.startswith("/api/"):
+        expected_token = config.DASHBOARD_API_TOKEN
+        if not expected_token:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": "Dashboard API is disabled until DASHBOARD_API_TOKEN is configured."},
+            )
+        supplied = request.headers.get("Authorization", "")
+        scheme, _, token = supplied.partition(" ")
+        if scheme.lower() != "bearer" or not secrets.compare_digest(token, expected_token):
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Valid dashboard bearer token required."},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    return await call_next(request)
 
 # Static files mount
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -392,7 +414,7 @@ async def handle_shopify_order_webhook(
     if x_shopify_hmac_sha256:
         is_valid_hmac = verify_shopify_hmac(raw_body, x_shopify_hmac_sha256, client_secret)
 
-    if not is_valid_hmac and x_shopify_hmac_sha256:
+    if not is_valid_hmac:
         logger.warning(f"❌ Invalid Shopify HMAC signature received: {x_shopify_hmac_sha256}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

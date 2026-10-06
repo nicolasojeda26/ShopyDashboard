@@ -12,6 +12,19 @@ from agents.liquid_coder_agent import LiquidCoderAgent
 from agents.fulfillment_agent import FulfillmentAgent
 from agents.orchestrator import DropshippingPipelineOrchestrator
 from config import config
+from tools.cj_client import CJClient
+
+
+@pytest.fixture
+def dashboard_auth(monkeypatch):
+    import api.webhook_listener as listener
+    from agents.inventory_sync_worker import InventorySyncWorker
+
+    monkeypatch.setattr(config, "DASHBOARD_API_TOKEN", "test-dashboard-token")
+    # The listener builds its agents from .env at import time; never let tests reach the live store or CJ.
+    monkeypatch.setattr(listener, "fulfillment_agent", FulfillmentAgent(dry_run=True))
+    monkeypatch.setattr(listener, "inventory_worker", InventorySyncWorker(dry_run=True))
+    return {"Authorization": "Bearer test-dashboard-token"}
 
 
 @pytest.fixture
@@ -305,20 +318,38 @@ def sample_shopify_order():
 async def test_fulfillment_agent_payload_mapping(mock_shopify_client, sample_shopify_order):
     agent = FulfillmentAgent(shopify_client=mock_shopify_client, dry_run=True)
     order_details = agent.extract_order_details(sample_shopify_order)
-    
+
     assert order_details["order_id"] == "998811223344"
     assert order_details["customer_name"] == "Carlos Santana"
     assert order_details["shipping_address"].zip == "97477"
     assert len(order_details["line_items"]) == 1
     assert order_details["line_items"][0].sku == "DS-NECK-FAN-01"
+    assert agent.validate_order(order_details) == []
 
     supplier_payload = agent.map_to_supplier_payload(order_details)
+    assert supplier_payload["orderNumber"] == "SHOPIFY-1005-998811223344"
     assert supplier_payload["shippingCustomerName"] == "Carlos Santana"
-    assert "742 Evergreen Terrace" in supplier_payload["shippingAddress"]
+    assert supplier_payload["shippingAddress"] == "742 Evergreen Terrace"
+    assert supplier_payload["shippingAddress2"] == "Apt 4B"
     assert supplier_payload["shippingCountryCode"] == "US"
-    assert len(supplier_payload["products"]) == 1
-    assert supplier_payload["products"][0]["sku"] == "DS-NECK-FAN-01"
-    assert supplier_payload["products"][0]["quantity"] == 2
+    assert supplier_payload["shippingCountry"] == "United States"
+    assert supplier_payload["logisticName"] == config.SUPPLIER_LOGISTIC_NAME
+    assert supplier_payload["fromCountryCode"] == "CN"
+    assert supplier_payload["payType"] == config.SUPPLIER_PAY_TYPE
+    assert supplier_payload["products"] == [{"sku": "DS-NECK-FAN-01", "quantity": 2, "storeLineItemId": "112233"}]
+
+
+def test_fulfillment_agent_does_not_invent_missing_data(mock_shopify_client, sample_shopify_order):
+    agent = FulfillmentAgent(shopify_client=mock_shopify_client, dry_run=True)
+    sample_shopify_order["shipping_address"] = None
+    sample_shopify_order["line_items"][0]["sku"] = None
+    order_details = agent.extract_order_details(sample_shopify_order)
+
+    assert order_details["shipping_address"].address1 == ""
+    assert order_details["shipping_address"].city == ""
+    problems = agent.validate_order(order_details)
+    assert "missing shipping address1" in problems
+    assert any("has no SKU" in p for p in problems)
 
 
 @pytest.mark.asyncio
@@ -334,74 +365,93 @@ async def test_fulfillment_agent_process_order_success(mock_shopify_client, samp
 
 
 @pytest.mark.asyncio
-async def test_fulfillment_agent_real_http_post_mocked(mock_shopify_client, sample_shopify_order, monkeypatch):
+async def test_fulfillment_agent_skips_when_auto_order_disabled(mock_shopify_client, sample_shopify_order, monkeypatch):
+    import httpx
+
+    async def fail_request(self, *args, **kwargs):
+        raise AssertionError("CJ must not be called when SUPPLIER_AUTO_ORDER is off")
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fail_request)
+    agent = FulfillmentAgent(
+        cj_client=CJClient(api_key="test_key"),
+        shopify_client=mock_shopify_client,
+        dry_run=False,
+        auto_order=False,
+    )
+    result = await agent.process_order_webhook(sample_shopify_order)
+
+    assert result.status == "SKIPPED_AUTO_ORDER_DISABLED"
+    assert result.tracking_code is None
+    assert result.shopify_fulfillment_synced is False
+
+
+@pytest.mark.asyncio
+async def test_fulfillment_agent_real_http_post_mocked(mock_shopify_client, sample_shopify_order, monkeypatch, tmp_path):
     import httpx
 
     # Create agent in live HTTP mode with configured API key
     agent = FulfillmentAgent(
-        supplier_api_url="https://api.supplier.com/v1/orders",
-        supplier_api_key="test_supplier_secret_token_123",
+        cj_client=CJClient(api_key="test_cj_api_key_123", base_url="https://cj.test/api2.0/v1", token_cache=tmp_path / "token.json"),
         shopify_client=mock_shopify_client,
         dry_run=False,
+        auto_order=True,
     )
 
-    captured_request = {}
+    captured = []
 
-    async def mock_post(self, url, *args, **kwargs):
-        captured_request["url"] = str(url)
-        captured_request["headers"] = kwargs.get("headers", {})
-        captured_request["json"] = kwargs.get("json", {})
-        
-        # Return mock HTTP 200 response
-        mock_response = httpx.Response(
-            status_code=200,
-            json={
+    async def mock_request(self, method, url, *args, **kwargs):
+        captured.append({"url": str(url), "headers": kwargs.get("headers", {}), "json": kwargs.get("json", {})})
+        if str(url).endswith("/authentication/getAccessToken"):
+            body = {"code": 200, "result": True, "data": {"accessToken": "exchanged_access_token"}}
+        else:
+            body = {
                 "code": 200,
                 "result": True,
-                "data": {
-                    "orderNumber": kwargs.get("json", {}).get("orderNumber"),
-                    "trackingNumber": "CJ9988REALTRACKING",
-                    "logisticName": "CJ_PACKET_FAST",
-                }
-            },
-            request=httpx.Request("POST", str(url))
-        )
-        return mock_response
+                "data": {"orderId": "CJ-ORDER-42", "orderNumber": kwargs["json"]["orderNumber"], "orderStatus": "CREATED"},
+            }
+        return httpx.Response(status_code=200, json=body, request=httpx.Request(method, str(url)))
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    monkeypatch.setattr(httpx.AsyncClient, "request", mock_request)
 
     result = await agent.process_order_webhook(sample_shopify_order)
 
-    assert captured_request["url"] == "https://api.supplier.com/v1/orders"
-    assert captured_request["headers"]["CJ-Access-Token"] == "test_supplier_secret_token_123"
-    assert captured_request["headers"]["Authorization"] == "Bearer test_supplier_secret_token_123"
-    assert captured_request["json"]["shippingCustomerName"] == "Carlos Santana"
-    assert result.status == "SUCCESS_FULFILLED"
-    assert result.tracking_code == "CJ9988REALTRACKING"
-    assert result.tracking_company == "CJ_PACKET_FAST"
+    auth_call, order_call = captured
+    assert auth_call["url"] == "https://cj.test/api2.0/v1/authentication/getAccessToken"
+    assert auth_call["json"] == {"apiKey": "test_cj_api_key_123"}
+    assert order_call["url"] == "https://cj.test/api2.0/v1/shopping/order/createOrderV2"
+    assert order_call["headers"]["CJ-Access-Token"] == "exchanged_access_token"
+    assert order_call["json"]["shippingCustomerName"] == "Carlos Santana"
+    # CJ assigns tracking later: the order must not be marked fulfilled with a made-up number
+    assert result.status == "SUPPLIER_ORDER_CREATED"
+    assert result.supplier_po_number == "CJ-ORDER-42"
+    assert result.tracking_code is None
+    assert result.shopify_fulfillment_synced is False
 
 
 @pytest.mark.asyncio
-async def test_fulfillment_agent_error_handling_and_logging(mock_shopify_client, sample_shopify_order, monkeypatch):
+async def test_fulfillment_agent_error_handling_and_logging(mock_shopify_client, sample_shopify_order, monkeypatch, tmp_path):
     import httpx
     from pathlib import Path
 
+    (tmp_path / "token.json").write_text(
+        json.dumps({"access_token": "cached", "api_key_tail": "_token"[-6:], "expires_at": 9999999999}), encoding="utf-8"
+    )
     agent = FulfillmentAgent(
-        supplier_api_url="https://api.supplier.com/v1/orders",
-        supplier_api_key="test_token",
+        cj_client=CJClient(api_key="test_token", base_url="https://cj.test/api2.0/v1", token_cache=tmp_path / "token.json"),
         shopify_client=mock_shopify_client,
         dry_run=False,
+        auto_order=True,
     )
 
     # Test HTTP 400 (Out of stock)
-    async def mock_post_400(self, url, *args, **kwargs):
+    async def mock_post_400(self, method, url, *args, **kwargs):
         return httpx.Response(
             status_code=400,
             text='{"code": 400, "message": "Product SKU DS-NECK-FAN-01 is out of stock in warehouse"}',
-            request=httpx.Request("POST", str(url))
+            request=httpx.Request(method, str(url))
         )
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post_400)
+    monkeypatch.setattr(httpx.AsyncClient, "request", mock_post_400)
     result_400 = await agent.process_order_webhook(sample_shopify_order)
 
     assert result_400.status == "FAILED_SUPPLIER_ERROR_400"
@@ -409,18 +459,32 @@ async def test_fulfillment_agent_error_handling_and_logging(mock_shopify_client,
     assert "HTTP 400" in result_400.error_message
 
     # Test HTTP 402 (Insufficient balance)
-    async def mock_post_402(self, url, *args, **kwargs):
+    async def mock_post_402(self, method, url, *args, **kwargs):
         return httpx.Response(
             status_code=402,
             text='{"code": 402, "message": "Insufficient funds in supplier wallet. Please recharge."}',
-            request=httpx.Request("POST", str(url))
+            request=httpx.Request(method, str(url))
         )
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post_402)
+    monkeypatch.setattr(httpx.AsyncClient, "request", mock_post_402)
     result_402 = await agent.process_order_webhook(sample_shopify_order)
 
     assert result_402.status == "FAILED_SUPPLIER_ERROR_402"
     assert "HTTP 402" in result_402.error_message
+
+    # CJ also reports business errors as HTTP 200 with result=false
+    async def mock_result_false(self, method, url, *args, **kwargs):
+        return httpx.Response(
+            status_code=200,
+            json={"code": 1603001, "result": False, "message": "Order number already exists"},
+            request=httpx.Request(method, str(url))
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", mock_result_false)
+    result_dup = await agent.process_order_webhook(sample_shopify_order)
+
+    assert result_dup.status == "FAILED_SUPPLIER_ERROR_1603001"
+    assert "already exists" in result_dup.error_message
 
     # Verify error_log.txt exists and contains recorded error events
     error_log_path = Path("error_log.txt")
@@ -447,11 +511,11 @@ async def test_shopify_graphql_fulfillment_mutation(mock_shopify_client):
 # 7. Tests for FastAPI Web Dashboard Endpoints
 # -----------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_dashboard_api_endpoints():
+async def test_dashboard_api_endpoints(dashboard_auth):
     from httpx import ASGITransport, AsyncClient
     from api.webhook_listener import app
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=dashboard_auth) as ac:
         # Test GET / (HTML Dashboard)
         res_root = await ac.get("/")
         assert res_root.status_code == 200
@@ -534,11 +598,11 @@ async def test_inventory_sync_worker_price_and_stockout(mock_shopify_client, mon
 
 
 @pytest.mark.asyncio
-async def test_inventory_sync_api_endpoints():
+async def test_inventory_sync_api_endpoints(dashboard_auth):
     from httpx import ASGITransport, AsyncClient
     from api.webhook_listener import app
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=dashboard_auth) as ac:
         # Test POST /api/inventory/sync
         res_sync = await ac.post("/api/inventory/sync")
         assert res_sync.status_code == 200

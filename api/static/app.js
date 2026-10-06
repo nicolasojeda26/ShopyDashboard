@@ -3,6 +3,25 @@
  */
 
 document.addEventListener('DOMContentLoaded', () => {
+  async function dashboardFetch(url, options = {}) {
+    let token = sessionStorage.getItem('dashboardApiToken');
+    if (!token) {
+      token = window.prompt('Token de acceso privado al panel:') || '';
+      if (!token) throw new Error('Se canceló el acceso al panel.');
+      sessionStorage.setItem('dashboardApiToken', token);
+    }
+    const headers = new Headers(options.headers || {});
+    headers.set('Authorization', `Bearer ${token}`);
+    const response = await fetch(url, { ...options, headers });
+    if (response.status === 401 || response.status === 503) {
+      const detail = await response.json().catch(() => ({}));
+      if (response.status === 401) sessionStorage.removeItem('dashboardApiToken');
+      window.alert(detail.detail || 'No se pudo autenticar el acceso al panel.');
+      throw new Error(detail.detail || 'Acceso al panel rechazado.');
+    }
+    return response;
+  }
+
   // Navigation tabs
   const navItems = document.querySelectorAll('.nav-item');
   const tabContents = document.querySelectorAll('.tab-content');
@@ -65,7 +84,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Fetch Dashboard Stats
   async function fetchStats() {
     try {
-      const res = await fetch('/api/stats');
+      const res = await dashboardFetch('/api/stats');
       if (!res.ok) return;
       const data = await res.json();
 
@@ -94,7 +113,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Fetch Orders History
   async function fetchOrders() {
     try {
-      const res = await fetch('/api/orders');
+      const res = await dashboardFetch('/api/orders');
       if (!res.ok) return;
       const orders = await res.json();
 
@@ -151,7 +170,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Fetch Catalog Products
   async function fetchProducts() {
     try {
-      const res = await fetch('/api/products');
+      const res = await dashboardFetch('/api/products');
       if (!res.ok) return;
       const products = await res.json();
       const grid = document.getElementById('catalog-products-grid');
@@ -196,7 +215,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Fetch Error Logs
   async function fetchLogs() {
     try {
-      const res = await fetch('/api/logs');
+      const res = await dashboardFetch('/api/logs');
       if (!res.ok) return;
       const data = await res.json();
       const logsElem = document.getElementById('error-logs-content');
@@ -218,7 +237,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     try {
-      const res = await fetch('/api/webhook/simulate', { method: 'POST' });
+      const res = await dashboardFetch('/api/webhook/simulate', { method: 'POST' });
       const result = await res.json();
       alert(`✔ Orden ${result.fulfillment?.shopify_order_number || 'Generada'} procesada con éxito.\nPO Proveedor: ${result.fulfillment?.supplier_po_number}\nTracking: ${result.fulfillment?.tracking_code}`);
       fetchStats();
@@ -246,7 +265,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     try {
-      const res = await fetch('/api/inventory/sync', { method: 'POST' });
+      const res = await dashboardFetch('/api/inventory/sync', { method: 'POST' });
       const result = await res.json();
       const report = result.report;
       alert(`✔ Sincronización de Stock y Precios Completada.\n- Productos analizados: ${report.items_scanned}\n- Precios recalculados: ${report.price_adjustments}\n- Agotados detectados: ${report.stockouts_detected}\n- Duración: ${report.duration_sec}s`);
@@ -299,7 +318,7 @@ document.addEventListener('DOMContentLoaded', () => {
       progressBar.style.width = '45%';
       statusPercent.textContent = '45%';
 
-      const res = await fetch('/api/pipeline/run', {
+      const res = await dashboardFetch('/api/pipeline/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ input_file: file, live: isLive }),
