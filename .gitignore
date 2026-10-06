@@ -26,3 +26,6 @@ error_log.txt
 # OS files
 .DS_Store
 Thumbs.db
+
+# CJ access token cache
+.cj_token.json

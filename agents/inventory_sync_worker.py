@@ -11,10 +11,10 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import httpx
 from pydantic import BaseModel, Field
 
 from config import config
+from tools.cj_client import CJClient
 from tools.shopify_client import ShopifyClient
 
 logger = logging.getLogger("InventorySyncWorker")
@@ -54,14 +54,15 @@ class InventorySyncWorker:
     def __init__(
         self,
         shopify_client: Optional[ShopifyClient] = None,
-        supplier_api_url: Optional[str] = None,
-        supplier_api_key: Optional[str] = None,
+        cj_client: Optional[CJClient] = None,
         dry_run: Optional[bool] = None,
+        auto_reprice: Optional[bool] = None,
     ):
         self.shopify = shopify_client or ShopifyClient(dry_run=dry_run)
-        self.supplier_api_url = supplier_api_url or config.SUPPLIER_API_URL
-        self.supplier_api_key = supplier_api_key if supplier_api_key is not None else config.SUPPLIER_API_KEY
+        self.cj_client = cj_client or CJClient()
         self.dry_run = dry_run if dry_run is not None else config.DRY_RUN
+        # Live repricing is opt-in: cost x 2.5 ignores shipping, so it can undercut a hand-set price.
+        self.auto_reprice = auto_reprice if auto_reprice is not None else config.SYNC_AUTO_REPRICE
 
     def _load_sync_history(self) -> List[Dict[str, Any]]:
         if SYNC_HISTORY_FILE.exists():
@@ -84,11 +85,12 @@ class InventorySyncWorker:
         except Exception as e:
             logger.warning(f"Could not save sync history: {e}")
 
-    async def fetch_supplier_stock_and_cost(self, sku: str) -> Dict[str, Any]:
+    async def fetch_supplier_stock_and_cost(self, sku: str) -> Optional[Dict[str, Any]]:
         """
-        Queries supplier REST API for up-to-date warehouse stock and wholesale cost.
+        Queries CJ for up-to-date warehouse stock and wholesale cost.
+        Returns None in live mode when CJ cannot be reached, so nothing is changed on guesses.
         """
-        if self.dry_run or not self.supplier_api_key:
+        if self.dry_run:
             # Deterministic simulation based on SKU
             return {
                 "sku": sku,
@@ -97,30 +99,13 @@ class InventorySyncWorker:
                 "status": "IN_STOCK",
             }
 
-        headers = {
-            "CJ-Access-Token": self.supplier_api_key,
-            "Authorization": f"Bearer {self.supplier_api_key}",
-            "Content-Type": "application/json",
-        }
-
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                query_url = f"{self.supplier_api_url.replace('/createOrder', '/queryStock')}?sku={sku}"
-                resp = await client.get(query_url, headers=headers)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return {
-                        "sku": sku,
-                        "available_stock": int(data.get("stock", 100)),
-                        "wholesale_cost": float(data.get("cost", 8.50)),
-                        "status": "IN_STOCK" if int(data.get("stock", 100)) > 0 else "OUT_OF_STOCK",
-                    }
-                else:
-                    logger.warning(f"Supplier stock query returned {resp.status_code}. Using fallback.")
-                    return {"sku": sku, "available_stock": 100, "wholesale_cost": 8.50, "status": "IN_STOCK"}
+            data = await self.cj_client.get_stock_and_cost(sku)
         except Exception as e:
-            logger.warning(f"Error connecting to supplier for SKU {sku}: {e}")
-            return {"sku": sku, "available_stock": 100, "wholesale_cost": 8.50, "status": "IN_STOCK"}
+            logger.warning(f"Could not read CJ stock/cost for SKU {sku}: {e}")
+            return None
+        data["status"] = "IN_STOCK" if data["available_stock"] > 0 else "OUT_OF_STOCK"
+        return data
 
     async def sync_inventory_and_pricing(
         self,
@@ -138,16 +123,19 @@ class InventorySyncWorker:
             from api.webhook_listener import load_catalog_history
             products = load_catalog_history()
 
-        if not products:
+        if not products and self.dry_run:
             # Fallback mock item
             products = [
                 {
                     "optimized_seo_title": "Cinturón de Nylon para Halterofilia Pro Auto-Lock",
                     "shopify_product_id": "gid://shopify/Product/9794800484581",
+                    "shopify_variant_id": "gid://shopify/ProductVariant/4455667788",
+                    "inventory_item_id": "gid://shopify/InventoryItem/1122334455",
                     "suggested_price": 21.25,
                     "sku": "DS-CINTURON-01",
                 }
             ]
+        products = products or []
 
         location_id = await self.shopify.get_primary_location_id()
         changes: List[SyncItemChange] = []
@@ -156,42 +144,55 @@ class InventorySyncWorker:
 
         for p in products:
             title = p.get("optimized_seo_title") or p.get("title", "Product")
-            sku = p.get("sku") or f"DS-{title[:8].upper()}-01"
-            prod_id = p.get("shopify_product_id") or "gid://shopify/Product/8899112233"
-            current_price = float(p.get("suggested_price", 21.25))
+            sku = p.get("sku")
+            prod_id = p.get("shopify_product_id")
+            variant_id = p.get("shopify_variant_id")
+            inv_item_id = p.get("inventory_item_id")
+            current_price = float(p.get("suggested_price") or 0)
+
+            if not sku:
+                changes.append(SyncItemChange(sku="", product_title=title, shopify_product_id=prod_id, status="SKIPPED", notes="Sin SKU del proveedor"))
+                continue
 
             supplier_data = await self.fetch_supplier_stock_and_cost(sku)
-            wholesale_cost = float(supplier_data.get("wholesale_cost", 8.50))
-            available_stock = int(supplier_data.get("available_stock", 100))
+            if supplier_data is None:
+                changes.append(SyncItemChange(sku=sku, product_title=title, shopify_product_id=prod_id, status="SUPPLIER_UNAVAILABLE", notes="No se pudo consultar a CJ; no se modificó nada"))
+                continue
+            wholesale_cost = float(supplier_data["wholesale_cost"])
+            available_stock = int(supplier_data["available_stock"])
 
             # Calculate target price maintaining 2.5x dropshipping margin
             expected_price = round(wholesale_cost * 2.5, 2)
-            expected_compare_price = round(expected_price * 1.45, 2)
 
             price_changed = abs(expected_price - current_price) > 0.05
             is_stockout = available_stock <= 0
+            notes = []
 
             if price_changed or is_stockout:
                 if price_changed:
                     price_adjustments += 1
-                    logger.info(f"⚡ Price update for '{title}': ${current_price} -> ${expected_price}")
-                    variant_id = "gid://shopify/ProductVariant/4455667788"
-                    await self.shopify.update_variant_price(
-                        product_id=prod_id,
-                        variant_id=variant_id,
-                        price=expected_price,
-                        compare_at_price=expected_compare_price,
-                    )
+                    if (self.dry_run or self.auto_reprice) and prod_id and variant_id:
+                        logger.info(f"⚡ Price update for '{title}': ${current_price} -> ${expected_price}")
+                        await self.shopify.update_variant_price(
+                            product_id=prod_id,
+                            variant_id=variant_id,
+                            price=expected_price,
+                            compare_at_price=None,
+                        )
+                        notes.append("Precio recalculado por variación de costo mayorista")
+                    else:
+                        notes.append(f"Precio sugerido ${expected_price} (no aplicado: SYNC_AUTO_REPRICE desactivado)")
 
                 if is_stockout:
                     stockouts_detected += 1
-                    logger.warning(f"⚠ Stockout detected for '{title}'. Setting inventory to 0.")
-                    inv_item_id = "gid://shopify/InventoryItem/1122334455"
-                    await self.shopify.set_inventory_quantity(
-                        inventory_item_id=inv_item_id,
-                        location_id=location_id,
-                        available_quantity=0,
-                    )
+                    if inv_item_id:
+                        logger.warning(f"⚠ Stockout detected for '{title}'. Setting inventory to 0.")
+                        await self.shopify.set_inventory_quantity(
+                            inventory_item_id=inv_item_id,
+                            location_id=location_id,
+                            available_quantity=0,
+                        )
+                    notes.append("Agotado en depósito")
 
                 changes.append(
                     SyncItemChange(
@@ -200,10 +201,9 @@ class InventorySyncWorker:
                         shopify_product_id=prod_id,
                         old_price=current_price,
                         new_price=expected_price if price_changed else current_price,
-                        old_stock=100,
                         new_stock=available_stock,
                         status="STOCKOUT" if is_stockout else "PRICE_UPDATED",
-                        notes="Precio recalculado por variación de costo mayorista" if price_changed else "Agotado en depósito",
+                        notes="; ".join(notes),
                     )
                 )
 

@@ -15,6 +15,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from config import config
+from tools.cj_client import CJAPIError, CJClient
 from tools.shopify_client import ShopifyClient
 
 logger = logging.getLogger("FulfillmentAgent")
@@ -36,15 +37,18 @@ class ShippingAddress(BaseModel):
 
 
 class OrderLineItem(BaseModel):
-    sku: str = Field(default="UNKNOWN-SKU")
+    sku: str = Field(default="")
     title: str = Field(default="Dropship Item")
     quantity: int = Field(default=1)
     price: float = Field(default=0.0)
     variant_id: Optional[int] = None
+    line_item_id: Optional[int] = None
     supplier_item_id: Optional[str] = None
 
 
 class SupplierFulfillmentResult(BaseModel):
+    # SUCCESS_FULFILLED (tracking synced to Shopify), SUPPLIER_ORDER_CREATED (CJ order created,
+    # tracking arrives later), SKIPPED_AUTO_ORDER_DISABLED, or FAILED_*
     status: str = Field(default="SUCCESS_FULFILLED")
     shopify_order_id: str
     shopify_order_number: str
@@ -74,21 +78,22 @@ class SupplierAPIError(Exception):
 
 class FulfillmentAgent:
     """
-    Automates Dropshipping Auto-Fulfillment from Shopify webhooks to Supplier REST API.
+    Automates Dropshipping Auto-Fulfillment from Shopify webhooks to the CJ Dropshipping API.
     """
 
     def __init__(
         self,
-        supplier_api_url: Optional[str] = None,
-        supplier_api_key: Optional[str] = None,
+        cj_client: Optional[CJClient] = None,
         shopify_client: Optional[ShopifyClient] = None,
         dry_run: Optional[bool] = None,
+        auto_order: Optional[bool] = None,
     ):
-        self.supplier_api_url = supplier_api_url or config.SUPPLIER_API_URL
-        self.supplier_api_key = supplier_api_key if supplier_api_key is not None else config.SUPPLIER_API_KEY
+        self.cj_client = cj_client or CJClient()
+        self.supplier_api_url = f"{self.cj_client.base_url}/shopping/order/createOrderV2"
         self.supplier_name = config.SUPPLIER_NAME or "CJ_DROPSHIPPING"
         self.shopify_client = shopify_client or ShopifyClient(dry_run=dry_run)
         self.dry_run = dry_run if dry_run is not None else config.DRY_RUN
+        self.auto_order = auto_order if auto_order is not None else config.SUPPLIER_AUTO_ORDER
 
     def _log_error_to_file(self, order_id: str, error_type: str, details: str, status_code: Optional[int] = None):
         """
@@ -107,60 +112,48 @@ class FulfillmentAgent:
     def extract_order_details(self, webhook_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Parses Shopify orders/create JSON structure and extracts essential customer,
-        shipping address & line items.
+        shipping address & line items. Missing data is left empty, never invented.
         """
-        order_id = str(webhook_payload.get("id", f"MOCK-{uuid.uuid4().hex[:8]}"))
-        order_name = str(webhook_payload.get("name", f"#{webhook_payload.get('order_number', '1001')}"))
-        email = webhook_payload.get("email") or webhook_payload.get("contact_email", "customer@example.com")
+        order_id = str(webhook_payload.get("id", ""))
+        order_name = str(webhook_payload.get("name") or f"#{webhook_payload.get('order_number', '')}")
+        email = webhook_payload.get("email") or webhook_payload.get("contact_email")
 
         # 1. Customer & Shipping
-        shipping = webhook_payload.get("shipping_address") or webhook_payload.get("customer", {}).get("default_address", {})
-        customer = webhook_payload.get("customer", {})
+        shipping = webhook_payload.get("shipping_address") or {}
+        customer = webhook_payload.get("customer") or {}
 
         first_name = shipping.get("first_name") or customer.get("first_name") or ""
         last_name = shipping.get("last_name") or customer.get("last_name") or ""
-        customer_name = f"{first_name} {last_name}".strip() or "Valued Customer"
+        customer_name = shipping.get("name") or f"{first_name} {last_name}".strip()
 
         shipping_address = ShippingAddress(
             name=customer_name,
             first_name=first_name,
             last_name=last_name,
-            address1=shipping.get("address1", "123 Main St"),
+            address1=shipping.get("address1") or "",
             address2=shipping.get("address2"),
-            city=shipping.get("city", "Miami"),
-            province=shipping.get("province", "FL"),
-            province_code=shipping.get("province_code", "FL"),
-            zip=shipping.get("zip", "33101"),
-            country=shipping.get("country", "United States"),
-            country_code=shipping.get("country_code", "US"),
-            phone=shipping.get("phone") or customer.get("phone") or "+1 555-0199",
+            city=shipping.get("city") or "",
+            province=shipping.get("province") or "",
+            province_code=shipping.get("province_code") or "",
+            zip=shipping.get("zip") or "",
+            country=shipping.get("country") or "",
+            country_code=shipping.get("country_code") or "",
+            phone=shipping.get("phone") or customer.get("phone"),
         )
 
-        # 2. Line items & SKUs
-        raw_items = webhook_payload.get("line_items", [])
+        # 2. Line items & SKUs (the Shopify SKU is the CJ variant SKU)
         line_items: List[OrderLineItem] = []
-        for item in raw_items:
-            sku = item.get("sku") or f"DS-{item.get('title', 'ITEM')[:8].upper()}"
-            qty = int(item.get("quantity", 1))
-            price = float(item.get("price", 0.0))
+        for item in webhook_payload.get("line_items", []):
+            if item.get("requires_shipping") is False:
+                continue
             line_items.append(
                 OrderLineItem(
-                    sku=sku,
+                    sku=item.get("sku") or "",
                     title=item.get("title", "Product"),
-                    quantity=qty,
-                    price=price,
+                    quantity=int(item.get("quantity", 1)),
+                    price=float(item.get("price", 0.0)),
                     variant_id=item.get("variant_id"),
-                )
-            )
-
-        if not line_items:
-            # Fallback item if empty
-            line_items.append(
-                OrderLineItem(
-                    sku="DS-FIT-7012-M",
-                    title="7mm Neoprene Compression Knee Sleeves",
-                    quantity=1,
-                    price=29.50,
+                    line_item_id=item.get("id"),
                 )
             )
 
@@ -175,110 +168,96 @@ class FulfillmentAgent:
             "currency": webhook_payload.get("currency", "USD"),
         }
 
+    def validate_order(self, order_info: Dict[str, Any]) -> List[str]:
+        """Returns the reasons the order cannot be sent to CJ (empty list if it can)."""
+        shipping: ShippingAddress = order_info["shipping_address"]
+        problems = [
+            f"missing shipping {field}"
+            for field, value in [
+                ("name", shipping.name),
+                ("address1", shipping.address1),
+                ("city", shipping.city),
+                ("country_code", shipping.country_code),
+            ]
+            if not value
+        ]
+        if not order_info["line_items"]:
+            problems.append("no shippable line items")
+        problems += [f"line item '{i.title}' has no SKU" for i in order_info["line_items"] if not i.sku]
+        return problems
+
     def map_to_supplier_payload(self, order_info: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Maps extracted Shopify order data to the exact schema required by the supplier REST API.
+        Maps extracted Shopify order data to the CJ createOrderV2 schema.
         """
         shipping: ShippingAddress = order_info["shipping_address"]
         items: List[OrderLineItem] = order_info["line_items"]
         order_name = order_info["order_name"].replace("#", "")
 
-        supplier_order_number = f"PO-SHP-{order_name}-{uuid.uuid4().hex[:4].upper()}"
+        # Deterministic, so a retried webhook is rejected by CJ as a duplicate instead of shipping twice.
+        supplier_order_number = f"SHOPIFY-{order_name}-{order_info['order_id']}"
 
         return {
             "orderNumber": supplier_order_number,
             "shippingCustomerName": shipping.name,
-            "shippingAddress": f"{shipping.address1} {shipping.address2 or ''}".strip(),
+            "shippingAddress": shipping.address1,
+            "shippingAddress2": shipping.address2 or "",
             "shippingCity": shipping.city,
             "shippingProvince": shipping.province or shipping.province_code,
             "shippingZip": shipping.zip,
-            "shippingCountryCode": shipping.country_code or "US",
-            "shippingPhone": shipping.phone,
-            "email": order_info.get("email"),
+            "shippingCountry": shipping.country,
+            "shippingCountryCode": shipping.country_code,
+            "shippingPhone": shipping.phone or "",
+            "email": order_info.get("email") or "",
+            "logisticName": config.SUPPLIER_LOGISTIC_NAME,
+            "fromCountryCode": config.SUPPLIER_FROM_COUNTRY,
+            "payType": config.SUPPLIER_PAY_TYPE,
+            "remark": f"Shopify order {order_info['order_name']} ({self.shopify_client.shop_domain})",
             "products": [
                 {
                     "sku": item.sku,
-                    "title": item.title,
                     "quantity": item.quantity,
-                    "unitPrice": round(item.price * 0.35, 2),  # Estimated wholesale cost
-                    "variantId": item.variant_id,
+                    "storeLineItemId": str(item.line_item_id or ""),
                 }
                 for item in items
             ],
-            "remark": f"Auto-fulfilled from Shopify store ({self.shopify_client.shop_domain})",
         }
 
     async def dispatch_to_supplier_api(self, supplier_payload: Dict[str, Any], order_id: str) -> Dict[str, Any]:
         """
-        Dispatches HTTP POST request with authentication headers to the supplier REST endpoint.
-        Handles API errors, out of stock, invalid tokens, and insufficient funds.
+        Creates the order in CJ. Handles API errors, out of stock, invalid tokens, and insufficient funds.
+        Returns CJ's `data` object (orderId, orderStatus, ...).
         """
-        # If running in dry_run or missing API key in dev mode, simulate successful provider fulfillment
-        if self.dry_run or not self.supplier_api_key:
+        if self.dry_run:
             logger.info(f"[Simulation/Dry-Run] Dispatching mock purchase order {supplier_payload['orderNumber']} to {self.supplier_api_url}")
-            mock_tracking = f"CJ{uuid.uuid4().hex[:10].upper()}YQ"
             return {
-                "code": 200,
-                "result": True,
-                "message": "Order created successfully in simulation mode",
-                "data": {
-                    "orderNumber": supplier_payload["orderNumber"],
-                    "orderId": f"SUP-ID-{uuid.uuid4().hex[:12].upper()}",
-                    "trackingNumber": mock_tracking,
-                    "logisticName": self.supplier_name,
-                    "status": "CREATED",
-                }
+                "orderNumber": supplier_payload["orderNumber"],
+                "orderId": f"SIM-{uuid.uuid4().hex[:12].upper()}",
+                "trackingNumber": f"CJ{uuid.uuid4().hex[:10].upper()}YQ",
+                "logisticName": self.supplier_name,
+                "orderStatus": "CREATED",
             }
 
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "CJ-Access-Token": self.supplier_api_key,
-            "Authorization": f"Bearer {self.supplier_api_key}",
-            "X-API-Key": self.supplier_api_key,
-            "User-Agent": "Shopify-Dropshipping-AutoAgent/1.0",
+        if not self.cj_client.api_key:
+            message = "SUPPLIER_API_KEY is required for live fulfillment; refusing to simulate a supplier order."
+            self._log_error_to_file(order_id, "SUPPLIER_CREDENTIALS_MISSING", message)
+            raise SupplierAPIError(503, message)
+
+        error_types = {
+            400: "OUT_OF_STOCK_OR_BAD_REQUEST",
+            401: "UNAUTHORIZED_TOKEN_INVALID",
+            402: "INSUFFICIENT_FUNDS",
+            429: "RATE_LIMIT_EXCEEDED",
         }
-
         try:
-            async with httpx.AsyncClient(timeout=25.0) as client:
-                logger.info(f"POST {self.supplier_api_url} | PO: {supplier_payload['orderNumber']}")
-                response = await client.post(
-                    self.supplier_api_url,
-                    json=supplier_payload,
-                    headers=headers,
-                )
-
-                # Check HTTP status codes
-                if response.status_code == 400:
-                    err_msg = "Stock unavailable or invalid request parameters (HTTP 400)"
-                    self._log_error_to_file(order_id, "OUT_OF_STOCK_OR_BAD_REQUEST", f"{err_msg}: {response.text}", 400)
-                    raise SupplierAPIError(400, err_msg, response.text)
-
-                elif response.status_code == 401:
-                    err_msg = "Unauthorized: Invalid or expired SUPPLIER_API_KEY (HTTP 401)"
-                    self._log_error_to_file(order_id, "UNAUTHORIZED_TOKEN_INVALID", f"{err_msg}: {response.text}", 401)
-                    raise SupplierAPIError(401, err_msg, response.text)
-
-                elif response.status_code == 402:
-                    err_msg = "Payment Required: Insufficient balance / funds in supplier wallet (HTTP 402)"
-                    self._log_error_to_file(order_id, "INSUFFICIENT_FUNDS", f"{err_msg}: {response.text}", 402)
-                    raise SupplierAPIError(402, err_msg, response.text)
-
-                elif response.status_code == 429:
-                    err_msg = "Too Many Requests: Supplier rate limit reached (HTTP 429)"
-                    self._log_error_to_file(order_id, "RATE_LIMIT_EXCEEDED", f"{err_msg}: {response.text}", 429)
-                    raise SupplierAPIError(429, err_msg, response.text)
-
-                elif response.status_code >= 500:
-                    err_msg = f"Supplier Internal Server Error (HTTP {response.status_code})"
-                    self._log_error_to_file(order_id, "SUPPLIER_SERVER_ERROR", f"{err_msg}: {response.text}", response.status_code)
-                    raise SupplierAPIError(response.status_code, err_msg, response.text)
-
-                response.raise_for_status()
-                data = response.json()
-                logger.info(f"✔ Supplier response received: {data}")
-                return data
-
+            logger.info(f"POST {self.supplier_api_url} | PO: {supplier_payload['orderNumber']}")
+            data = await self.cj_client.create_order(supplier_payload)
+            logger.info(f"✔ CJ order created: {data}")
+            return data or {}
+        except CJAPIError as e:
+            error_type = error_types.get(e.status_code, "SUPPLIER_SERVER_ERROR" if e.status_code >= 500 else "SUPPLIER_REJECTED_ORDER")
+            self._log_error_to_file(order_id, error_type, f"{e.message}: {e.response_text}", e.status_code)
+            raise SupplierAPIError(e.status_code, e.message, e.response_text)
         except httpx.RequestError as req_err:
             err_msg = f"Network communication failure connecting to supplier API: {req_err}"
             self._log_error_to_file(order_id, "NETWORK_REQUEST_ERROR", err_msg)
@@ -311,8 +290,8 @@ class FulfillmentAgent:
 
     async def process_order_webhook(self, webhook_payload: Dict[str, Any]) -> SupplierFulfillmentResult:
         """
-        Receives webhook, transforms details, calls the real supplier REST API,
-        logs errors if any, and synchronizes the assigned tracking back to Shopify.
+        Receives webhook, transforms details, creates the CJ order, logs errors if any, and
+        synchronizes tracking back to Shopify when CJ already returned one.
         """
         order_info = self.extract_order_details(webhook_payload)
         order_id = order_info["order_id"]
@@ -323,7 +302,6 @@ class FulfillmentAgent:
 
         logger.info(f"⚡ [FulfillmentAgent] Ingesting order {order_name} (Shopify ID: {order_id}) for {shipping.name}")
 
-        # Map to supplier REST payload
         supplier_payload = self.map_to_supplier_payload(order_info)
         po_number = supplier_payload["orderNumber"]
 
@@ -337,35 +315,9 @@ class FulfillmentAgent:
             for i in items
         ]
 
-        try:
-            supplier_res = await self.dispatch_to_supplier_api(supplier_payload, order_id=order_id)
-            
-            # Extract tracking number from response
-            res_data = supplier_res.get("data", {}) if isinstance(supplier_res, dict) else {}
-            tracking_number = (
-                res_data.get("trackingNumber")
-                or supplier_res.get("trackingNumber")
-                or supplier_res.get("tracking_code")
-                or f"CJ{uuid.uuid4().hex[:10].upper()}YQ"
-            )
-            carrier = res_data.get("logisticName") or self.supplier_name
-            tracking_url = res_data.get("trackingUrl") or f"https://t.17track.net/en#nums={tracking_number}"
-
-            # Sync Tracking to Shopify
-            shopify_res = await self.sync_tracking_to_shopify(
-                order_id=order_id,
-                tracking_number=tracking_number,
-                tracking_company=carrier,
-                tracking_url=tracking_url,
-            )
-
-            fulfillment_id = None
-            if isinstance(shopify_res, dict):
-                fulfillment_data = shopify_res.get("data", {}).get("fulfillmentCreateV2", {}).get("fulfillment", {})
-                fulfillment_id = fulfillment_data.get("id")
-
-            return SupplierFulfillmentResult(
-                status="SUCCESS_FULFILLED",
+        def result(status: str, **kwargs) -> SupplierFulfillmentResult:
+            fields = dict(
+                status=status,
                 shopify_order_id=order_id,
                 shopify_order_number=order_name,
                 supplier_po_number=po_number,
@@ -373,52 +325,60 @@ class FulfillmentAgent:
                 customer_name=shipping.name,
                 shipping_destination=f"{shipping.city}, {shipping.province} ({shipping.country_code})",
                 items_fulfilled=items_summary,
-                estimated_delivery_days=7,
-                tracking_code=tracking_number,
-                mock_tracking_code=tracking_number,
-                tracking_company=carrier,
-                shopify_fulfillment_synced=True if fulfillment_id else False,
-                shopify_fulfillment_id=fulfillment_id,
+                estimated_delivery_days=0,
+                tracking_company=self.supplier_name,
                 fulfilled_at=now_iso,
             )
+            fields.update(kwargs)
+            return SupplierFulfillmentResult(**fields)
 
+        if not self.dry_run and not self.auto_order:
+            logger.info(f"SUPPLIER_AUTO_ORDER is off; leaving order {order_name} to the CJ Shopify app.")
+            return result("SKIPPED_AUTO_ORDER_DISABLED")
+
+        problems = self.validate_order(order_info)
+        if problems:
+            message = "; ".join(problems)
+            self._log_error_to_file(order_id, "INVALID_ORDER_DATA", message)
+            return result("FAILED_INVALID_ORDER", error_message=message)
+
+        try:
+            supplier_data = await self.dispatch_to_supplier_api(supplier_payload, order_id=order_id)
         except SupplierAPIError as e:
             logger.warning(f"Supplier fulfillment rejected for order {order_id}: {e.error_message}")
-            return SupplierFulfillmentResult(
-                status=f"FAILED_SUPPLIER_ERROR_{e.status_code}",
-                shopify_order_id=order_id,
-                shopify_order_number=order_name,
-                supplier_po_number=po_number,
-                supplier_api_endpoint=self.supplier_api_url,
-                customer_name=shipping.name,
-                shipping_destination=f"{shipping.city}, {shipping.province} ({shipping.country_code})",
-                items_fulfilled=items_summary,
-                estimated_delivery_days=0,
-                tracking_code=None,
-                mock_tracking_code=None,
-                tracking_company=self.supplier_name,
-                shopify_fulfillment_synced=False,
-                shopify_fulfillment_id=None,
-                fulfilled_at=now_iso,
-                error_message=f"[HTTP {e.status_code}] {e.error_message}",
-            )
+            return result(f"FAILED_SUPPLIER_ERROR_{e.status_code}", error_message=f"[HTTP {e.status_code}] {e.error_message}")
         except Exception as general_err:
             self._log_error_to_file(order_id, "UNEXPECTED_FULFILLMENT_EXCEPTION", str(general_err))
-            return SupplierFulfillmentResult(
-                status="FAILED_UNEXPECTED_ERROR",
-                shopify_order_id=order_id,
-                shopify_order_number=order_name,
-                supplier_po_number=po_number,
-                supplier_api_endpoint=self.supplier_api_url,
-                customer_name=shipping.name,
-                shipping_destination=f"{shipping.city}, {shipping.province} ({shipping.country_code})",
-                items_fulfilled=items_summary,
-                estimated_delivery_days=0,
-                tracking_code=None,
-                mock_tracking_code=None,
-                tracking_company=self.supplier_name,
-                shopify_fulfillment_synced=False,
-                shopify_fulfillment_id=None,
-                fulfilled_at=now_iso,
-                error_message=str(general_err),
+            return result("FAILED_UNEXPECTED_ERROR", error_message=str(general_err))
+
+        # CJ assigns tracking only after the parcel is dispatched; until then the Shopify order
+        # stays unfulfilled rather than being marked shipped with a made-up number.
+        tracking_number = supplier_data.get("trackingNumber")
+        carrier = supplier_data.get("logisticName") or self.supplier_name
+        if not tracking_number:
+            return result(
+                "SUPPLIER_ORDER_CREATED",
+                estimated_delivery_days=7,
+                tracking_company=carrier,
+                supplier_po_number=str(supplier_data.get("orderId") or po_number),
             )
+
+        shopify_res = await self.sync_tracking_to_shopify(
+            order_id=order_id,
+            tracking_number=tracking_number,
+            tracking_company=carrier,
+            tracking_url=supplier_data.get("trackingUrl") or f"https://t.17track.net/en#nums={tracking_number}",
+        )
+        fulfillment_id = None
+        if isinstance(shopify_res, dict):
+            fulfillment_id = (shopify_res.get("data") or {}).get("fulfillmentCreateV2", {}).get("fulfillment", {}).get("id")
+
+        return result(
+            "SUCCESS_FULFILLED",
+            estimated_delivery_days=7,
+            tracking_code=tracking_number,
+            mock_tracking_code=tracking_number if self.dry_run else None,
+            tracking_company=carrier,
+            shopify_fulfillment_synced=bool(fulfillment_id),
+            shopify_fulfillment_id=fulfillment_id,
+        )
